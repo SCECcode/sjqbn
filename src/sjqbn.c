@@ -5,6 +5,8 @@
  *
  * @section DESCRIPTION
  *
+ * the data file is small and so load all data internally
+ *
  */
 
 #include <limits.h>
@@ -14,7 +16,7 @@
 #include "um_netcdf.h"
 #include "cJSON.h"
 
-int sjqbn_ucvm_debug=0;
+int sjqbn_ucvm_debug=1;
 FILE *stderrfp=NULL;
 
 int TooBig=1;
@@ -142,13 +144,9 @@ if(sjqbn_ucvm_debug){ fprintf(stderrfp,"\ncalling sjqbn_query with %d numpoints\
     float *tmp_vs_buffer=NULL;
     float *tmp_rho_buffer=NULL;
 
-    float lon_f;
-    float lat_f;
-    float dep_f;
-    
-    int lon_idx, first_lon_idx;
-    int lat_idx, first_lat_idx;
-    int dep_idx, first_dep_idx;
+    int first_lon_idx;
+    int first_lat_idx;
+    int first_dep_idx;
 
     int same_lon_idx=1;
     int same_lat_idx=1;
@@ -158,15 +156,15 @@ if(sjqbn_ucvm_debug){ fprintf(stderrfp,"\ncalling sjqbn_query with %d numpoints\
     size_t *lat_idx_buffer;
     size_t *lon_idx_buffer;
 
+    int lon_idx;
+    int lat_idx;
+    int dep_idx;
+
     int offset;
 
-// hold the result
-    dep_idx_buffer = malloc(numpoints * sizeof(size_t));
-    if (!dep_idx_buffer) { fprintf(stderr, "malloc failed\n");}
-    lat_idx_buffer = malloc(numpoints * sizeof(size_t));
-    if (!lat_idx_buffer) { fprintf(stderr, "malloc failed\n");}
-    lon_idx_buffer = malloc(numpoints * sizeof(size_t));
-    if (!lon_idx_buffer) { fprintf(stderr, "malloc failed\n");}
+    //  hold coord point's info
+    sjqbn_pt_info_t *pt_info = (sjqbn_pt_info_t  *) malloc(numpoints * sizeof(sjqbn_pt_info_t));
+    if (!pt_info) { fprintf(stderr, "pt_info: malloc failed\n");}
 
 // iterate through all the points and compose the buffers for all index
     for(int i=0; i<numpoints; i++) {
@@ -176,155 +174,44 @@ if(sjqbn_ucvm_debug){ fprintf(stderrfp,"\ncalling sjqbn_query with %d numpoints\
         data[i].qp = -1;
         data[i].qs = -1;
 
-        lon_f=points[i].longitude;
-        lat_f=points[i].latitude;
-        dep_f=points[i].depth;
+        pt_info[i].lon=points[i].longitude;
+        pt_info[i].lat=points[i].latitude;
+        pt_info[i].dep=points[i].depth;
 
-if(sjqbn_ucvm_debug){ if(i<5) fprintf(stderrfp,"\nfirst %d, float lon/lat/dep = %f/%f/%f\n", i, lon_f, lat_f, dep_f); }
+        pt_info[i].lon_idx=find_buffer_idx_clamped(lon_list,nx,pt_info[i].lon);
+        pt_info[i].lat_idx=find_buffer_idx_clamped(lat_list,ny,pt_info[i].lat);
+        pt_info[i].dep_idx=find_buffer_idx_clamped(dep_list,nz,pt_info[i].dep);
 
-        lon_idx=find_buffer_idx((float *)lon_list,nx,lon_f);
-        lat_idx=find_buffer_idx((float *)lat_list,ny,lat_f);
-        dep_idx=find_buffer_idx((float *)dep_list,nz,dep_f);
-
-if(sjqbn_ucvm_debug){ if(i<5) fprintf(stderrfp,"    with idx lon/lat/dep = %d/%d/%d\n", lon_idx, lat_idx, dep_idx); }
+        /* check if out of range */
+        if(pt_info[i].lon_idx < 0 || pt_info[i].lat_idx < 0 || pt_info[i].dep_idx < 0) {
+          continue;
+        }
 
         if(i==0) {
-            first_dep_idx=dep_idx;
-            first_lon_idx=lon_idx;
-            first_lat_idx=lat_idx;
+            first_dep_idx=pt_info[i].dep_idx;
+            first_lon_idx=pt_info[i].lon_idx;
+            first_lat_idx=pt_info[i].lat_idx;
         }
-        dep_idx_buffer[i]=dep_idx;
-        lon_idx_buffer[i]=lon_idx;
-        lat_idx_buffer[i]=lat_idx;
 
-        if(dep_idx != first_dep_idx) same_dep_idx=0;
-        if(lon_idx != first_lon_idx) same_lon_idx=0;
-        if(lat_idx != first_lat_idx) same_lat_idx=0;
+        if(pt_info[i].dep_idx != first_dep_idx) same_dep_idx=0;
+        if(pt_info[i].lon_idx != first_lon_idx) same_lon_idx=0;
+        if(pt_info[i].lat_idx != first_lat_idx) same_lat_idx=0;
+
+        if(sjqbn_configuration->interpolation) { // fill cell percent
+            pt_info[i].lon_percent=find_cell_percent(lon_list,pt_info[i].lon,pt_info[i].lon_idx);
+            pt_info[i].lat_percent=find_cell_percent(lat_list,pt_info[i].lat,pt_info[i].lat_idx);
+            pt_info[i].dep_percent=find_cell_percent(dep_list,pt_info[i].dep,pt_info[i].dep_idx);
+        }
     }
 
-    int bucket_cnt=bucket_an_array(dep_idx_buffer, numpoints);
-
-// handle access 
-// if not TooBig, grab from in-memory buffer one at a time
-// if tooBig, then collect up all the index list and make just one call and
-// retrieve and disperse the result back into data
-
-    if(!TooBig) { 
-if(sjqbn_ucvm_debug){ fprintf(stderrfp,">> In-Memory access \n"); }
-
-// it is not too big, extract from data buffers one at a time
-        tmp_vp_buffer=dataset->vp_buffer;
-        tmp_vs_buffer=dataset->vs_buffer;
-        tmp_rho_buffer=dataset->rho_buffer;
-
-        for(int i=0; i<numpoints; i++) {
-            dep_idx=dep_idx_buffer[i];
-            lat_idx=lat_idx_buffer[i];
-            lon_idx=lon_idx_buffer[i];
-
-// offset= (dep_idx)*(lat_cnt * lon_cnt)+(lat_idx)*(lon_cnt)+lon_idx
-            offset= (dep_idx)*(ny * nx)+(lat_idx)*(nx)+lon_idx;
-
-if(sjqbn_ucvm_debug) { fprintf(stderrfp,"\nTarget offset %d : idx lon/lat/dep = %d/%d/%d\n", offset,lon_idx, lat_idx, dep_idx); }
-
-            data[i].vp = tmp_vp_buffer[offset];
-            data[i].vs = tmp_vs_buffer[offset];
-            data[i].rho =tmp_rho_buffer[offset];
+    // should be in the in-memory
+    for(int i=0; i<numpoints; i++) {
+        if(!sjqbn_configuration->interpolation) {
+// no interp
+            get_one_property(dataset, &(pt_info[i]), &(data[i]));
+            } else {
+                get_interp_property(dataset, &(pt_info[i]), &(data[i]));
         }
-    } else { 
-
-// special case, if numpoints < 5 just handle as random 
-
-// it is too big, extract data from external data file 
-// group netcdf access to 
-//   column based(same lat idx an same lon idx),
-//   or
-//   layer based(same depth idx) 
-//   or random method
-
-// if same_lon_idx and same_lat_idx,
-// it is depth profile
-//    extract the whole column with dataset->nz for different set 
-//    and then extract data from buffer one at a time using dep_idx 
-        if(numpoints > 5  && same_lon_idx && same_lat_idx ) {
-		 
-          // grab a col from cache
-            sjqbn_cache_col_t *col=find_a_cache_col(dataset, first_lat_idx, first_lon_idx); 
-if(sjqbn_ucvm_debug){ fprintf(stderrfp,">> Using Col cache - %d\n", dataset->col_cache_cnt); }
-          
-            tmp_vp_buffer=col->col_vp_buffer;
-            tmp_vs_buffer=col->col_vs_buffer;
-            tmp_rho_buffer=col->col_rho_buffer;
-
-            for(int i=0; i<numpoints; i++) { 
-                offset=dep_idx_buffer[i];
-
-                data[i].vp = tmp_vp_buffer[offset];
-                data[i].vs = tmp_vs_buffer[offset];
-                data[i].rho =tmp_rho_buffer[offset];
-            }
-
-// if just same_dep_idx, it is a horizontal slice,
-// extract the whole layer using dataset->nx and dataset->ny
-// and then extract data from buffer using lon_idx, and lat_idx
-        } else if (numpoints > 5 && same_dep_idx) { 
-          // grab a col from cache
-            sjqbn_cache_layer_t *layer=find_a_cache_layer(dataset, first_dep_idx);
-if(sjqbn_ucvm_debug){ fprintf(stderrfp,">> Using Layer cache - %d\n", dataset->layer_cache_cnt); }
-          
-            tmp_vp_buffer=layer->layer_vp_buffer;
-            tmp_vs_buffer=layer->layer_vs_buffer;
-            tmp_rho_buffer=layer->layer_rho_buffer;
-
-            for(int i=0; i<numpoints; i++) { 
-                lat_idx=lat_idx_buffer[i];
-                lon_idx=lon_idx_buffer[i];
-                offset= (lat_idx * nx) + lon_idx;
-
-                data[i].vp = tmp_vp_buffer[offset];
-                data[i].vs = tmp_vs_buffer[offset];
-                data[i].rho =tmp_rho_buffer[offset];
-            }
-        } else {  
-// a very special case,
-            if( _ON && bucket_cnt < SJQBN_CACHE_LAYER_MAX) {	    
-if(sjqbn_ucvm_debug){ fprintf(stderrfp,">> Using special cache layer\n"); }
-if(sjqbn_ucvm_debug){ fprintf(stderrfp," BUCKET count is %d \n", bucket_cnt); }
-                int last_idx=-1;
-		sjqbn_cache_layer_t *last_layer=NULL;
-		sjqbn_cache_layer_t *layer=NULL;
-                for(int i=0; i<numpoints; i++) { 
-                    lat_idx=lat_idx_buffer[i];
-                    lon_idx=lon_idx_buffer[i];
-                    dep_idx=dep_idx_buffer[i];
-                    if(layer == NULL) {
-		        layer=find_a_cache_layer(dataset, dep_idx);
-                    } else if (last_idx == dep_idx) { 
-                        layer = last_layer;
-                    } else { // there is a layer switch
-		        layer=find_a_cache_layer(dataset, dep_idx);
-                    }
-		    last_layer = layer;
-		    last_idx=dep_idx;
-
-                    offset= (lat_idx * nx) + lon_idx;
-                    data[i].vp = (layer->layer_vp_buffer)[offset];
-                    data[i].vs = (layer->layer_vs_buffer)[offset];
-                    data[i].rho = (layer->layer_rho_buffer)[offset];
-	        }
-                } else {
-// handle it as random and so just default to per location access
-if(sjqbn_ucvm_debug){ fprintf(stderrfp,">> Using random call \n"); }
-                    for(int i=0; i<numpoints; i++) { 
-                        lat_idx=lat_idx_buffer[i];
-                        lon_idx=lon_idx_buffer[i];
-                        dep_idx=dep_idx_buffer[i];
-                        data[i].vp=get_nc_vara_float(dataset->ncid, dataset->vp_varid, dep_idx, lat_idx, lon_idx);
-                        data[i].vs=get_nc_vara_float(dataset->ncid, dataset->vs_varid, dep_idx, lat_idx, lon_idx);
-                        data[i].rho=get_nc_vara_float(dataset->ncid, dataset->rho_varid, dep_idx, lat_idx, lon_idx);
-	                }
-            }
-         }
     }
 
     return SUCCESS;

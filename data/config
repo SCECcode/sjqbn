@@ -5,6 +5,9 @@ utm_zone=10
 model_dir = sjqbn 
 model_data_path = https://g-3a9041.a78b8.36fe.data.globus.org/ucvm/models
 
+# interpolation only works when using in-memory data access (too_big == off)
+interpolation = on 
+
 data_file = { "LABEL" : "first", "FILE" : "model_SJQ_dll0.01.nc" }
 
 

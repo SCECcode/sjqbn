@@ -70,9 +70,8 @@ typedef struct sjqbn_configuration_t {
 	/** The model directory */
 	char model_dir[128];
         /** GTL on or off (1 or 0) */
-        int gtl;
-	/** interpolation (1 or 0) */
-	int interpolation;
+	/** interpolation on or off (1 or 0) */
+        int interpolation;
 
         /* how many datasets are in the model */
         int dataset_cnt;

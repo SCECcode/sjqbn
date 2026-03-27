@@ -245,8 +245,124 @@ cleanup:
     return buffer;
 }
 
+// e_dimlens,  expected dimlens
+float *get_nc_float_buffer(int ncid, char *varname, const char *path, nc_type *vtype, size_t *nelems, int e_dimlens) { 
+    int varid=-1;
+    int ndims = 0;
+    int natts = 0;
+    size_t nnelems = 1;
+    int *dimids=0;
+    size_t *dimlens=0;
+    float *buffer = NULL;
+    size_t elem_size = 0;
+    nc_type nvtype;
 
-int find_buffer_idx(float *buffer, size_t nelems, float target) {
+    varid=get_nc_varid(ncid,varname,path);
+    nnelems =get_nc_var(ncid, varid, &nvtype, &ndims, &dimids, &dimlens);
+    // ndims should be 1 or 3
+    if(ndims != e_dimlens) {
+        fprintf(stderr," Fail to extract %s data\n",varname);
+        goto cleanup;
+    }
+
+
+    /* get list from external file */
+    switch ( nvtype ) {
+        case NC_BYTE:
+        case NC_UBYTE:
+            if(debug) printf("\nBuffer of NC_BYTE or NC_UBYTE");
+            break;
+
+        case NC_CHAR:
+            if(debug) printf("\nBuffer of NC_CHAR");
+            break;
+
+        case NC_SHORT:
+            if(debug) printf("\nBuffer of NC_SHORT");
+            break;
+
+        case NC_USHORT:
+            if(debug) printf("\nBuffer of NC_USHORT");
+            break;
+
+        case NC_INT:
+            if(debug) printf("\nBuffer of NC_INT");
+            break;
+
+        case NC_UINT:
+            if(debug) printf("\nBuffer of NC_UINT");
+            break;
+
+        case NC_INT64:
+            if(debug) printf("\nBuffer of NC_INT64 => NC_FLOAT");
+            break;
+
+        case NC_UINT64:
+            if(debug) printf("\nBuffer of NC_UINT64");
+            break;
+
+        case NC_FLOAT:
+            if(debug) printf("\nBuffer of NC_FLOAT");
+            break;
+
+        case NC_DOUBLE:
+            if(debug) printf("\nBuffer of NC_DOUBLE => NC_FLOAT");
+            break;
+
+        default:
+            fprintf(stderr, "Unsupported variable type (type id=%d)\n", nvtype);
+            goto cleanup;
+    }
+
+    elem_size = sizeof(float);
+    buffer = malloc(nnelems * elem_size);
+    if (!buffer) { fprintf(stderr, "malloc failed\n"); goto cleanup; }
+    NC_CHECK(nc_get_var_float(ncid, varid, (float*)buffer));
+
+    /* Print some information and sample values */
+    if(debug) {
+        printf("\n  File: %s\n", path);
+        printf("  Var name: %s\n", varname);
+        printf("  Original Type: %d\n", (int)nvtype);
+        printf("  Dimensions: %d\n", ndims);
+        for (int i = 0; i < ndims; ++i) {
+            char dname[NC_MAX_NAME + 1];
+            NC_CHECK(nc_inq_dimname(ncid, dimids[i], dname));
+            printf("     dim[%d] name=%s len=%zu\n", i, dname, dimlens[i]);
+        }
+        printf("  Total elements: %zu\n", nnelems);
+    }
+
+cleanup: 
+    if(dimids) free(dimids);
+    if(dimlens) free(dimlens);
+    * vtype = nvtype;
+    * nelems = nnelems;
+    return buffer;
+}
+
+
+float *get_binary_float_buffer(const char *datadir, char *datafile, int total) {
+
+    int elem_size = sizeof(float);
+    float *buffer = (float *) malloc(total * elem_size);
+    if (!buffer) { fprintf(stderr, "malloc failed\n"); return NULL; }
+
+    char filepath[256];
+    sprintf(filepath, "%s/%s", datadir, datafile);
+    if(debug) fprintf(stderr," data file ..%s\n", filepath);
+
+    FILE *fp=fopen(filepath,"rb");
+    size_t read_count = fread(buffer, sizeof(float), total, fp);
+    if (read_count != total) {
+        printf("Warning: read %zu elements (expected %d)\n", read_count, total);
+    }
+    fclose(fp);
+    return buffer;
+}
+
+// find nearest buffer idx even it it is over it
+int find_nearest_buffer_idx(float *buffer, size_t nelems, float target) {
     size_t lo = 0, hi = nelems; // search in [lo, hi)
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
@@ -274,6 +390,57 @@ int find_buffer_idx(float *buffer, size_t nelems, float target) {
     return idx;
 }
 
+// find  lowest array value that is lower than target
+int find_buffer_idx(float *buffer, size_t nelems, float target) {
+    if (nelems < 2) return -1;
+
+    if (target < buffer[0] || target > buffer[nelems - 1]) return -1;
+
+    int lo = 0, hi = nelems - 2;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (buffer[mid] <= target) 
+          lo = mid;
+        else
+          hi = mid - 1;
+    }
+    return lo;
+}
+
+
+/* Find bracketing cell index i such that grid[i] <= x <= grid[i+1].
+   If x is outside, returns nearest edge cell index instead of erroring. */
+int find_buffer_idx_clamped(float *buffer, size_t nelems, float target) {
+    if (nelems < 2) return -1;
+
+    if (target <= buffer[0]) {
+        return 0;
+    }
+    if (target >= buffer[nelems - 1]) {
+        return nelems - 2;
+    }
+
+    int lo = 0, hi = nelems - 1;
+    while (hi - lo > 1) {
+        int mid = lo + (hi - lo) / 2;
+        if (buffer[mid] <= target) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// find the percent of target [0-1] within the cell
+float find_cell_percent(float *buffer, float target, int idx) {
+
+    float percent=(target - buffer[idx])/(buffer[idx+1]-buffer[idx]);
+    if(percent < 0.0) percent=0;
+    if(percent > 1.0) percent=1.0;
+    return percent;
+}
+
 
 float get_nc_vara_float(int ncid, int varid, int dep_idx, int lat_idx, int lon_idx) {
 // depth, lat, lon
@@ -294,8 +461,8 @@ return val;
 // dep profile = one lat-idx, one lon-idx,  z varies
 //
 int cache_depth_col_float(int ncid, int varid, 
-		size_t ndepth, size_t lat_idx, size_t lon_idx,
-                float *col /* size >= ndepth */) {
+    size_t ndepth, size_t lat_idx, size_t lon_idx,
+    float *col /* size >= ndepth */) {
 
     size_t start[3] = {0, lat_idx, lon_idx};
     size_t count[3] = {ndepth, 1, 1};

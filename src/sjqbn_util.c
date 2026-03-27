@@ -10,7 +10,6 @@
 
 /**** for sjqbn_dataset_t ****/
 sjqbn_dataset_t *make_a_sjqbn_dataset(char *datadir, char *datafile, int tooBig) {
-
     char filepath[256];
     size_t nelems= 0;
     nc_type vtype;
@@ -56,32 +55,21 @@ sjqbn_dataset_t *make_a_sjqbn_dataset(char *datadir, char *datafile, int tooBig)
     data->vs_varid=get_nc_varid(data->ncid,"vs",filepath);
     data->rho_varid=get_nc_varid(data->ncid,"rho",filepath);
 
-    data->layer_cache_cnt=0;
-    data->col_cache_cnt=0;
-
     data->in_memory =0;
 
-    if(!tooBig) {
 /* load all vp/vs/rho data in memory */
-        int total= data->nx * data->ny * data->nz;
+    int total= data->nx * data->ny * data->nz;
 
-        data->vp_buffer = (float *)malloc(total * sizeof(float));
-        data->vs_buffer = (float *)malloc(total * sizeof(float));
-        data->rho_buffer = (float *)malloc(total * sizeof(float));
+    data->vp_buffer = (float *)malloc(total * sizeof(float));
+    data->vs_buffer = (float *)malloc(total * sizeof(float));
+    data->rho_buffer = (float *)malloc(total * sizeof(float));
 
-        data->vp_buffer=get_nc_buffer(data->ncid, "vp", filepath, &vtype, &nelems, 3);
-        data->vs_buffer=get_nc_buffer(data->ncid, "vs", filepath, &vtype, &nelems, 3);
-        data->rho_buffer=get_nc_buffer(data->ncid, "rho", filepath, &vtype, &nelems, 3);
+    data->vp_buffer=get_nc_float_buffer(data->ncid, "vp", filepath, &vtype, &nelems, 3);
+    data->vs_buffer=get_nc_float_buffer(data->ncid, "vs", filepath, &vtype, &nelems, 3);
+    data->rho_buffer=get_nc_float_buffer(data->ncid, "rho", filepath, &vtype, &nelems, 3);
 
-	data->elems=total;
-        data->in_memory=1;
-
-        } else {
-	  data->elems=0;
-	  data->vp_buffer=NULL;
-	  data->vs_buffer=NULL;
-	  data->rho_buffer=NULL;
-    }
+    data->elems=total;
+    data->in_memory=1;
 
     return data;
 }
@@ -96,225 +84,74 @@ int free_sjqbn_dataset(sjqbn_dataset_t *data) {
     if(data->rho_buffer != NULL) free(data->rho_buffer);
     nc_close(data->ncid);
 
-    //free the caches
-    for(int i=0; i< data->layer_cache_cnt; i++) {
-      free_a_cache_layer(data->layer_cache[i]);
-    }
-    for(int i=0; i< data->col_cache_cnt; i++) {
-      free_a_cache_col(data->col_cache[i]);
-    }
-
     free(data);
     return SUCCESS;
 }
 
-/**** for sjqbn_cache_col_t ****/
-sjqbn_cache_col_t *_add_a_cache_col(sjqbn_dataset_t *dataset, int target_lat_idx, int target_lon_idx) {
- 
-   int nz=dataset->nz;
-
-   sjqbn_cache_col_t *col= (sjqbn_cache_col_t *) malloc(sizeof(sjqbn_cache_col_t));
-
-   col->cache_col_lat_idx=target_lat_idx;
-   col->cache_col_lon_idx=target_lon_idx;
-
-   // alloc space first 
-   col->col_vp_buffer=(float *) malloc(nz * sizeof(float));
-   col->col_vs_buffer=(float *) malloc(nz * sizeof(float));
-   col->col_rho_buffer=(float *) malloc(nz * sizeof(float));
-
-   cache_depth_col_float(dataset->ncid, dataset->vp_varid,
-                        nz, target_lat_idx, target_lon_idx, col->col_vp_buffer);
-   cache_depth_col_float(dataset->ncid, dataset->vs_varid,
-                        nz, target_lat_idx, target_lon_idx, col->col_vs_buffer);
-   cache_depth_col_float(dataset->ncid, dataset->rho_varid,
-                        nz, target_lat_idx, target_lon_idx, col->col_rho_buffer);
-   return col;
-}
-
-sjqbn_cache_col_t *find_a_cache_col(sjqbn_dataset_t *dataset, int target_lat_idx, int target_lon_idx) {
-
-   int cnt= dataset->col_cache_cnt; 
-   sjqbn_cache_col_t *col;
-
-   for(int i=0; i< cnt; i++) {
-     col=dataset->col_cache[i];
-     if((col->cache_col_lat_idx == target_lat_idx) &&
-		      (col->cache_col_lon_idx == target_lon_idx) ) {
-        // found it
-        return col;
-     }
-   }
-   // load it from the netcdf file
-   col=_add_a_cache_col(dataset, target_lat_idx, target_lon_idx);
-    
-   // find a space to put in (in case it is full)
-   if( cnt < SJQBN_CACHE_COL_MAX) {
-       dataset->col_cache[cnt]=col;
-       dataset->col_cache_cnt=cnt+1;
-       } else {
-// else has to free one out
-         int use_idx=(cnt+1) % SJQBN_CACHE_COL_MAX;
-         free_a_cache_col(dataset->col_cache[use_idx]);
-         dataset->col_cache[use_idx]=col;
-
-   }
-
-   return col;     
-}
-
-void free_a_cache_col(sjqbn_cache_col_t *col) {
-
-   // free buffer first 
-   free(col->col_vp_buffer);
-   free(col->col_vs_buffer);
-   free(col->col_rho_buffer);
-
-   free(col);
-}
-
-/**** for sjqbn_cache_layer_t ****/
-sjqbn_cache_layer_t *_add_a_cache_layer(sjqbn_dataset_t *dataset, int target_dep_idx) {
-
+/**** straight or trilinear/bilinear ****/
+int _buffer_offset(sjqbn_dataset_t * dataset, int x_idx, int  y_idx, int z_idx) {
     int nx=dataset->nx;
     int ny=dataset->ny;
+    int nz=dataset->nz;
 
-    if(sjqbn_ucvm_debug) { fprintf(stderrfp, "  Loading a new layer: %zu\n", target_dep_idx); }
-    sjqbn_cache_layer_t *layer= (sjqbn_cache_layer_t *) malloc(sizeof(sjqbn_cache_layer_t));
+    int offset= (z_idx)*(ny * nx)+(y_idx)*(nx)+x_idx;
+    if(sjqbn_ucvm_debug) { fprintf(stderrfp,"\nTarget offset %d : idx lon/lat/dep = %d/%d/%d\n", offset,x_idx, y_idx, z_idx); }
 
-    layer->cache_layer_dep_idx=target_dep_idx;
-
-    layer->layer_vp_buffer = (float * )malloc((nx*ny) * sizeof(float));
-    layer->layer_vs_buffer = (float * )malloc((nx*ny) * sizeof(float));
-    layer->layer_rho_buffer = (float * )malloc((nx*ny) * sizeof(float));
-
-    cache_latlon_layer_float(dataset->ncid, dataset->vp_varid,
-                      target_dep_idx, ny, nx, layer->layer_vp_buffer);
-    cache_latlon_layer_float(dataset->ncid, dataset->vs_varid,
-                      target_dep_idx, ny, nx, layer->layer_vs_buffer);
-    cache_latlon_layer_float(dataset->ncid, dataset->rho_varid,
-                      target_dep_idx, ny, nx, layer->layer_rho_buffer);
-    return layer;
+    return offset;
 }
 
-sjqbn_cache_layer_t *find_a_cache_layer(sjqbn_dataset_t *dataset, int target_dep_idx) {
+int get_one_property(sjqbn_dataset_t *dataset, sjqbn_pt_info_t *pt, sjqbn_properties_t *data) {
+    int offset= _buffer_offset(dataset, pt->lon_idx, pt->lat_idx, pt->dep_idx);
 
-   int cnt= dataset->layer_cache_cnt;
-   sjqbn_cache_layer_t *layer;
-
-   for(int i=0; i< cnt; i++) {
-     layer=dataset->layer_cache[i];
-     if((layer->cache_layer_dep_idx == target_dep_idx) ) {
-        // found it
-        return layer;
-     }
-   }
-   // load it from the netcdf file
-   layer=_add_a_cache_layer(dataset, target_dep_idx);
-
-   // find a space to put in (in case it is full)
-   if( cnt < SJQBN_CACHE_LAYER_MAX) {
-       dataset->layer_cache[cnt]=layer;
-       dataset->layer_cache_cnt=cnt+1;
-       } else {
-// else has to free one out
-         int use_idx=(cnt+1) % SJQBN_CACHE_LAYER_MAX;
-         free_a_cache_layer(dataset->layer_cache[use_idx]);
-         dataset->layer_cache[use_idx]=layer;
-   }
-   return layer;     
+    data->vp=dataset->vp_buffer[offset];
+    data->vs=dataset->vs_buffer[offset];
+    data->rho=dataset->rho_buffer[offset];
+    return offset;
 }
 
-void free_a_cache_layer(sjqbn_cache_layer_t *layer) {
 
-   free(layer->layer_vp_buffer);
-   free(layer->layer_vs_buffer);
-   free(layer->layer_rho_buffer);
+float _interp_a_point(sjqbn_dataset_t *dataset, float *buffer, sjqbn_pt_info_t *pt) {
+    int lon_idx=pt->lon_idx;
+    int lat_idx=pt->lat_idx;
+    int dep_idx=pt->dep_idx;
+    float lon_percent=pt->lon_percent;
+    float lat_percent=pt->lat_percent;
+    float dep_percent=pt->dep_percent;
 
-   free(layer);
+    if(pt->lon_idx < 0 || pt->lat_idx < 0 || pt->dep_idx < 0) {
+        // out of bound
+        return -1;	
+    }
+
+    float val0= buffer[_buffer_offset(dataset,lon_idx,lat_idx,dep_idx)];      // x,    y, z
+    float val1= buffer[_buffer_offset(dataset,lon_idx+1,lat_idx,dep_idx)];    // x+1,  y, z 
+    float val2= buffer[_buffer_offset(dataset,lon_idx,lat_idx+1,dep_idx)];    // x,  y+1, z 
+    float val3= buffer[_buffer_offset(dataset,lon_idx+1,lat_idx+1,dep_idx)];  // x+1,y+1, z
+    float val4= buffer[_buffer_offset(dataset,lon_idx,lat_idx,dep_idx+1)];    // x,    y, z+1
+    float val5= buffer[_buffer_offset(dataset,lon_idx+1,lat_idx,dep_idx+1)];  // x+1,  y, z+1
+    float val6= buffer[_buffer_offset(dataset,lon_idx,lat_idx+1,dep_idx+1)];  // x,  y+1, z+1
+    float val7= buffer[_buffer_offset(dataset,lon_idx+1,lat_idx+1,dep_idx+1)];// x+1,y+1, z+1
+        
+    float val00= val0 * (1-lat_percent) + val1 * lat_percent;    
+    float val11= val4 * (1-lat_percent) + val5 * lat_percent;    
+    float val22= val2 * (1-lat_percent) + val3 * lat_percent;    
+    float val33= val6 * (1-lat_percent) + val7 * lat_percent;    
+
+    float val000 = val00 * (1-lon_percent) + val22 * lon_percent;
+    float val111 = val11 * (1-lon_percent) + val33 * lon_percent;
+
+    float val0000 = val000 * (1-dep_percent) + val111 * dep_percent;
+    return val0000;
 }
 
-/*** bucket sort the layer index ***/
+void get_interp_property(sjqbn_dataset_t *dataset, sjqbn_pt_info_t *pt, sjqbn_properties_t *data) {
 
-static int cmp_size_t(const void *a, const void *b) {
-    size_t av = *(const size_t *)a;
-    size_t bv = *(const size_t *)b;
-    return (av > bv) - (av < bv);
-}
-
-/**
- * Groups identical values without modifying the input array.
- *
- * @param arr  pointer to input values (not modified)
- * @param n    number of elements in arr
- * @param out_bucket_count  output: number of unique buckets
- * @return dynamically-allocated array of Bucket (size = *out_bucket_count), or NULL on error
- *
- * Notes:
- *   - On success with n==0: returns NULL and sets *out_bucket_count = 0
- *   - Caller must free() the returned pointer.
- */
-bucket_t *bucketize_unique_counts(const size_t *arr, size_t n, size_t *out_bucket_count) {
-    if (!out_bucket_count) return NULL;
-    *out_bucket_count = 0;
-
-    if (!arr || n == 0) {
-        return NULL; // nothing to do
-    }
-
-    // 1) Copy input (to keep original unmodified)
-    size_t *copy = malloc(n * sizeof(*copy));
-    if (!copy) return NULL;
-    memcpy(copy, arr, n * sizeof(*copy));
-
-    // 2) Sort the copy
-    qsort(copy, n, sizeof(*copy), cmp_size_t);
-
-    // 3) Allocate worst-case buckets (all values unique)
-    bucket_t *buckets = malloc(n * sizeof(*buckets));
-    if (!buckets) {
-        free(copy);
-        return NULL;
-    }
-
-    // 4) Scan sorted copy to form (value, count) buckets
-    size_t bcount = 0;
-    size_t i = 0;
-    while (i < n) {
-        size_t v = copy[i];
-        size_t j = i + 1;
-        while (j < n && copy[j] == v) j++;
-
-        buckets[bcount].value = v;
-        buckets[bcount].count = j - i;
-        bcount++;
-
-        i = j;
-    }
-
-    // 5) (Optional) shrink to fit
-    bucket_t *shrunk = realloc(buckets, bcount * sizeof(*buckets));
-    if (shrunk) buckets = shrunk;
-
-    free(copy);
-    *out_bucket_count = bcount;
-    return buckets;
-}
-
-int bucket_an_array(size_t *idx_arr, size_t n) { 
-
-    size_t bucket_count = 0;
-    bucket_t *buckets = bucketize_unique_counts(idx_arr, n, &bucket_count);
-    if (!buckets && bucket_count != 0) {
-        fprintf(stderr, "Error creating buckets\n");
-    }
-
-    if(sjqbn_ucvm_debug) { fprintf(stderrfp, "Unique buckets: %zu\n", bucket_count); }
-    for (size_t i = 0; i < bucket_count; ++i) {
-        if(sjqbn_ucvm_debug) { fprintf(stderrfp, "value=%zu count=%zu\n", buckets[i].value, buckets[i].count); }
-    }
-
-    free(buckets);
-    return bucket_count;
+    if(sjqbn_ucvm_debug) { fprintf(stderrfp,"\nInterp PROCESSING for vp\n"); }
+    data->vp = _interp_a_point(dataset, dataset->vp_buffer, pt);
+    if(sjqbn_ucvm_debug) { fprintf(stderrfp,"\nInterp PROCESSING for vs\n"); }
+    data->vs = _interp_a_point(dataset, dataset->vs_buffer, pt);
+    if(sjqbn_ucvm_debug) { fprintf(stderrfp,"\nInterp PROCESSING for rho\n"); }
+    data->rho = _interp_a_point(dataset, dataset->rho_buffer, pt);
+    return;
 }
 
