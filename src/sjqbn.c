@@ -16,7 +16,7 @@
 #include "um_netcdf.h"
 #include "cJSON.h"
 
-int sjqbn_ucvm_debug=1;
+int sjqbn_ucvm_debug=0;
 FILE *stderrfp=NULL;
 
 int TooBig=1;
